@@ -76,10 +76,13 @@ const ctx: ToolContext = { paperless, ollama, vectorStore };
 // MCP Server setup
 // ---------------------------------------------------------------------------
 
+const SERVICE_NAME = "papercortex";
+const SERVICE_VERSION = "0.1.0";
+
 const server = new Server(
   {
-    name: "papercortex",
-    version: "0.1.0",
+    name: SERVICE_NAME,
+    version: SERVICE_VERSION,
   },
   {
     capabilities: {
@@ -247,9 +250,31 @@ async function startHttp(): Promise<void> {
 
   const httpServer = http.createServer(async (req, res) => {
     try {
-      if (req.url === "/health" && req.method === "GET") {
+      // Root — service info so uptime checks against the bare domain get a 200
+      if (req.url === "/" && (req.method === "GET" || req.method === "HEAD")) {
         res.writeHead(200, { "Content-Type": "application/json" });
-        res.end(JSON.stringify({ status: "ok", service: "PaperCortex", transport: "http" }));
+        if (req.method === "HEAD") {
+          res.end();
+        } else {
+          res.end(
+            JSON.stringify({
+              service: SERVICE_NAME,
+              version: SERVICE_VERSION,
+              status: "ok",
+              endpoints: { health: "/health", sse: "/sse", messages: "/messages" },
+            }),
+          );
+        }
+        return;
+      }
+
+      if (req.url === "/health" && (req.method === "GET" || req.method === "HEAD")) {
+        res.writeHead(200, { "Content-Type": "application/json" });
+        if (req.method === "HEAD") {
+          res.end();
+        } else {
+          res.end(JSON.stringify({ status: "ok", service: "PaperCortex", transport: "http" }));
+        }
         return;
       }
 
