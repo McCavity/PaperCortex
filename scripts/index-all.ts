@@ -124,6 +124,12 @@ async function main() {
   let aktualisiert = 0;
   let page      = 1;
 
+  // Aufraeumstufe 2026-09-21: jede von Paperless gelieferte ID mitschreiben.
+  // Ohne diese Menge kann der Lauf geloeschte Dokumente nicht erkennen — er
+  // iteriert ja nur ueber das, was Paperless noch hat.
+  const gesehen = new Set<number>();
+  let durchlaufVollstaendig = false;
+
   const sleep = (ms: number) => new Promise(r => setTimeout(r, ms));
 
   async function fetchDocumentWithRetry(id: number, retries = MAX_RETRIES): Promise<typeof paperless extends { getDocument(id: number): Promise<infer T> } ? T : never> {
@@ -153,7 +159,9 @@ async function main() {
       await sleep(2000);
       continue;
     }
-    if (result.results.length === 0) break;
+    for (const d of result.results) gesehen.add(d.id);
+
+    if (result.results.length === 0) { durchlaufVollstaendig = true; break; }
 
     // Batch-Verarbeitung
     for (let i = 0; i < result.results.length; i += BATCH_SIZE) {
@@ -209,8 +217,51 @@ async function main() {
       await sleep(BATCH_DELAY_MS);
     }
 
-    if (!result.next) break;
+    if (!result.next) { durchlaufVollstaendig = true; break; }
     page++;
+  }
+
+  // ---------------------------------------------------------------------
+  // Aufraeumstufe 2026-09-21: der Lauf fuegt hinzu und frischt auf — ein in
+  // Paperless GELOESCHTES Dokument sah er nie, denn es steht nicht mehr in der
+  // Liste, ueber die iteriert wird. Die Zeile blieb im Index liegen, samt
+  // Titel, Inhalt und Vektor: die semantische Suche lieferte Treffer auf
+  // Dokumente, die es nicht mehr gibt. Gemessen 21.09.2026 an Dokument 8.
+  //
+  // Drei Sperren, weil ein falsch erkannter "geloescht"-Zustand loescht:
+  //   1. Nur nach einem VOLLSTAENDIGEN Durchlauf. Bricht die Paginierung ab,
+  //      ist `gesehen` unvollstaendig — dann sieht jedes fehlende Dokument wie
+  //      ein geloeschtes aus. Das Flag wird ausschliesslich an den beiden
+  //      regulaeren Schleifenenden gesetzt.
+  //   2. Deckel bei 5 % des Bestands (mindestens 10). Mehr Kandidaten heissen
+  //      nicht "viel geloescht", sondern "die Erkennung ist kaputt".
+  //   3. `--keine-aufraeumung` schaltet die Stufe ganz ab.
+  //
+  // Verglichen wird gegen `indexiertAm` — den Indexstand VOR dem Lauf. In
+  // diesem Lauf neu geschriebene Zeilen stehen ohnehin in `gesehen`.
+  // ---------------------------------------------------------------------
+  let entfernt = 0;
+  let aufraeumHinweis = "";
+
+  if (process.argv.includes("--keine-aufraeumung")) {
+    aufraeumHinweis = "abgeschaltet (--keine-aufraeumung)";
+  } else if (!durchlaufVollstaendig) {
+    aufraeumHinweis = "uebersprungen — Durchlauf war unvollstaendig";
+  } else {
+    const karteileichen = [...indexiertAm.keys()].filter((id) => !gesehen.has(id));
+    const deckel = Math.max(10, Math.floor(indexiertAm.size * 0.05));
+    if (karteileichen.length > deckel) {
+      aufraeumHinweis =
+        `VERWEIGERT — ${karteileichen.length} Kandidaten ueber dem Deckel (${deckel}). ` +
+        `Das ist vermutlich ein Erkennungsfehler, kein Loeschvorgang. ` +
+        `Erste IDs: ${karteileichen.slice(0, 10).join(", ")}`;
+    } else {
+      for (const id of karteileichen) {
+        store.remove(id);
+        entfernt++;
+      }
+      if (entfernt > 0) aufraeumHinweis = `IDs: ${karteileichen.join(", ")}`;
+    }
   }
 
   console.log(`\n\n✅ Fertig!`);
@@ -218,6 +269,7 @@ async function main() {
   console.log(`   davon Auffrischungen: ${aktualisiert}`);
   console.log(`   Übersprungen:  ${skipped}`);
   console.log(`   Fehler:        ${errors}`);
+  console.log(`   Entfernt:      ${entfernt}${aufraeumHinweis ? ` — ${aufraeumHinweis}` : ""}`);
   console.log(`   Vector Store:  ${store.count()} Dokumente gesamt`);
 
   store.close();
